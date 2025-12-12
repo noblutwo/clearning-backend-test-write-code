@@ -907,6 +907,643 @@ export class CacheService {
 
 ---
 
+# 🏗️ Qreformátus SCALING & ARCHITECTURE
+
+## Nguyên Tắc Thiết Kế (Design Principles)
+
+### 1. SOLID Principles
+
+#### S - Single Responsibility Principle
+```typescript
+// ❌ BAD: 1 class làm nhiều việc
+class UserService {
+  async createUser(data) { /* ... */ }
+  async sendEmail(email) { /* ... */ }
+  async hashPassword(password) { /* ... */ }
+  async validateSSN(ssn) { /* ... */ }
+}
+
+// ✅ GOOD: Mỗi class 1 trách nhiệm
+class UserService {
+  async createUser(data) { /* ... */ }
+}
+class EmailService {
+  async send(email, template) { /* ... */ }
+}
+class HashService {
+  async hash(password) { /* ... */ }
+}
+class ValidationService {
+  async validateSSN(ssn) { /* ... */ }
+}
+```
+**Rule:** Nếu describe class cần "and", đó là dấu hiệu cần tách.
+
+---
+
+#### O - Open/Closed Principle
+```typescript
+// ❌ BAD: Thêm rule, sửa code cũ
+if (userType === 'ADMIN') {
+  // ...
+} else if (userType === 'MEMBER') {
+  // ...
+} else if (userType === 'VIP') {
+  // ...
+}
+
+// ✅ GOOD: Extend without modifying
+interface UserRole {
+  hasPermission(action: string): boolean;
+  getQuota(): number;
+}
+
+class AdminRole implements UserRole {
+  hasPermission(action: string) { return true; }
+  getQuota() { return Infinity; }
+}
+
+class MemberRole implements UserRole {
+  hasPermission(action: string) { return checkPermissions(action); }
+  getQuota() { return 100; }
+}
+
+// New role? Just add new class, không sửa code cũ
+```
+**Rule:** Nếu thêm feature mà sửa code cũ, design sai.
+
+---
+
+#### L - Liskov Substitution Principle
+```typescript
+// ❌ BAD: Subclass không follow contract
+abstract class Repository<T> {
+  async find(id: number): Promise<T | null> { /* ... */ }
+}
+
+class CachedRepository extends Repository {
+  async find(id: number): Promise<T | null> {
+    // Exception: return null nếu cache miss
+    // Violates contract!
+  }
+}
+
+// ✅ GOOD: Subclass respects contract
+class CachedRepository extends Repository {
+  async find(id: number): Promise<T | null> {
+    if (cache.has(id)) return cache.get(id);
+    const data = await super.find(id);
+    cache.set(id, data); // Enhancement, không breaking
+    return data;
+  }
+}
+```
+**Rule:** If you need `instanceof` check, LSP violated.
+
+---
+
+#### I - Interface Segregation Principle
+```typescript
+// ❌ BAD: Fat interface
+interface Repository<T> {
+  find(id: number): Promise<T>;
+  findAll(): Promise<T[]>;
+  create(data: Partial<T>): Promise<T>;
+  update(id: number, data: Partial<T>): Promise<T>;
+  delete(id: number): Promise<void>;
+  findByEmail(email: string): Promise<T>;
+  findByPhone(phone: string): Promise<T>;
+}
+
+// ✅ GOOD: Small, focused interfaces
+interface ReadRepository<T> {
+  find(id: number): Promise<T>;
+  findAll(): Promise<T[]>;
+}
+
+interface WriteRepository<T> {
+  create(data: Partial<T>): Promise<T>;
+  update(id: number, data: Partial<T>): Promise<T>;
+  delete(id: number): Promise<void>;
+}
+
+interface SearchRepository<T> {
+  findByEmail(email: string): Promise<T>;
+  findByPhone(phone: string): Promise<T>;
+}
+
+// Use only what you need
+class ReadOnlyService {
+  constructor(private repo: ReadRepository<User>) {}
+}
+```
+**Rule:** Interfaces should be small enough to implement fully.
+
+---
+
+#### D - Dependency Inversion Principle
+```typescript
+// ❌ BAD: Depend on concrete classes
+class BetService {
+  private db = new PostgresDatabase(); // Concrete
+  
+  async placeBet(dto) {
+    return this.db.save(/* ... */);
+  }
+}
+
+// ✅ GOOD: Depend on abstractions
+interface Database {
+  save<T>(entity: T): Promise<T>;
+  find<T>(id: number): Promise<T>;
+}
+
+class BetService {
+  constructor(private db: Database) {} // Abstract
+  
+  async placeBet(dto) {
+    return this.db.save(/* ... */);
+  }
+}
+
+// Can inject any Database implementation
+const betService = new BetService(new PostgresDatabase());
+const betServiceTest = new BetService(new MockDatabase());
+```
+**Rule:** Inject interfaces, not implementations.
+
+---
+
+### 2. DRY Principle (Don't Repeat Yourself)
+
+```typescript
+// ❌ SAI: Repeated validation logic
+@Post('bets')
+async placeBet(@Body() dto: PlaceBetDto) {
+  if (!dto.amount) throw new BadRequestException('Amount required');
+  if (dto.amount < 1000) throw new BadRequestException('Min 1000');
+  if (dto.amount > 1000000) throw new BadRequestException('Max 1000000');
+  // ... more code
+}
+
+@Post('refund')
+async refund(@Body() dto: RefundDto) {
+  if (!dto.amount) throw new BadRequestException('Amount required');
+  if (dto.amount < 1000) throw new BadRequestException('Min 1000');
+  if (dto.amount > 1000000) throw new BadRequestException('Max 1000000');
+  // ... more code
+}
+
+// ✅ ĐÚNG: Extract to reusable validator
+export class ValidateAmount {
+  @IsNumber()
+  @Min(1000)
+  @Max(1000000)
+  amount: number;
+}
+
+@Post('bets')
+@UsePipes(ValidationPipe)
+async placeBet(@Body() dto: PlaceBetDto & ValidateAmount) {
+  // Validation automatic
+}
+
+@Post('refund')
+@UsePipes(ValidationPipe)
+async refund(@Body() dto: RefundDto & ValidateAmount) {
+  // Validation automatic
+}
+```
+
+---
+
+### 3. KISS Principle (Keep It Simple, Stupid)
+
+```typescript
+// ❌ SAI: Over-engineered
+class ComplexCalculator {
+  private readonly MULTIPLIER = 2;
+  private readonly DIVISOR = 1;
+  
+  calculate(a: number, b: number): number {
+    return (a * this.MULTIPLIER + b * this.DIVISOR) / 
+           (this.MULTIPLIER + this.DIVISOR);
+  }
+}
+
+// ✅ ĐÚNG: Simple
+function calculateAverage(a: number, b: number): number {
+  return (a + b) / 2;
+}
+```
+**Rule:** Simple > Complex. If you need to comment, maybe too complex.
+
+---
+
+## Database Design Rules
+
+### Rule 1: Normalize, Then Denormalize by Metrics
+```sql
+-- ✅ Good: Normalized
+CREATE TABLE users (id INT PRIMARY KEY);
+CREATE TABLE wallets (id INT, user_id INT REFERENCES users, balance DECIMAL);
+CREATE TABLE transactions (id INT, wallet_id INT REFERENCES wallets, amount DECIMAL);
+
+-- For 100k+ users, add denormalized column for fast queries
+ALTER TABLE users ADD COLUMN current_balance DECIMAL;
+-- Sync with trigger:
+CREATE TRIGGER update_user_balance AFTER INSERT ON transactions
+  FOR EACH ROW UPDATE users SET current_balance = current_balance + NEW.amount WHERE id = NEW.user_id;
+```
+
+---
+
+### Rule 2: Partition Large Tables
+```sql
+-- ✅ Partition by time (for logs/transactions)
+CREATE TABLE transactions_2024 PARTITION OF transactions
+  FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+
+-- ✅ Partition by user_id (for scalability)
+CREATE TABLE bets_shard_0 PARTITION OF bets
+  FOR VALUES WITH (MODULUS 10, REMAINDER 0);
+CREATE TABLE bets_shard_1 PARTITION OF bets
+  FOR VALUES WITH (MODULUS 10, REMAINDER 1);
+```
+
+---
+
+### Rule 3: Index Strategy
+```sql
+-- ✅ Index hot queries
+CREATE INDEX idx_bets_user_round ON bets(user_id, round_id);
+CREATE INDEX idx_bets_status ON bets(status) WHERE status = 'PENDING';
+
+-- ✅ Covering index (includes data, avoid table scan)
+CREATE INDEX idx_bets_covering ON bets(user_id, round_id) INCLUDE (amount, odds);
+
+-- ❌ DON'T: Index everything
+-- Each index = slower writes + more storage
+```
+
+---
+
+### Rule 4: Primary Key Strategy
+```typescript
+// ❌ BAD: UUID (16 bytes) for everything
+@PrimaryGeneratedColumn('uuid')
+id: string;
+
+// ✅ GOOD: INT for internal, UUID for API
+@PrimaryGeneratedColumn()
+id: number; // 4 bytes, auto-increment, fast
+
+@Column({ unique: true })
+publicId: string; // UUID for external reference
+```
+
+---
+
+## API Design Rules
+
+### Rule 1: Versioning
+```typescript
+// ❌ BAD: No versioning
+@Controller('api/bets')
+export class BetController {}
+
+// ✅ GOOD: Version in URL
+@Controller('api/v1/bets')
+export class BetControllerV1 {}
+
+@Controller('api/v2/bets')
+export class BetControllerV2 {}
+
+// OR: Accept version header
+@Controller('api/bets')
+export class BetController {
+  @Get()
+  @Header('API-Version', '1.0')
+  getBets() { /* ... */ }
+}
+```
+
+---
+
+### Rule 2: Pagination
+```typescript
+// ❌ BAD: No limit
+@Get('/bets')
+async getBets() {
+  return betRepository.find(); // 1M rows!
+}
+
+// ✅ GOOD: Pagination
+@Get('/bets')
+async getBets(@Query('page', DefaultValuePipe) page = 1, @Query('limit', DefaultValuePipe) limit = 20) {
+  return betRepository.find({
+    skip: (page - 1) * limit,
+    take: limit,
+    order: { createdAt: 'DESC' }
+  });
+}
+
+// Response includes metadata
+{
+  "data": [...],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 5000,
+    "pages": 250
+  }
+}
+```
+
+---
+
+### Rule 3: Filtering & Sorting
+```typescript
+// ✅ GOOD: Flexible filtering
+@Get('/bets')
+async getBets(@Query() filter: BetFilterDto) {
+  // filter.status = 'PENDING'
+  // filter.minAmount = 10000
+  // filter.sortBy = 'amount' / 'createdAt'
+  // filter.order = 'ASC' / 'DESC'
+  
+  const query = betRepository.createQueryBuilder('bet');
+  
+  if (filter.status) query.andWhere('bet.status = :status', { status: filter.status });
+  if (filter.minAmount) query.andWhere('bet.amount >= :minAmount', { minAmount: filter.minAmount });
+  
+  query.orderBy(`bet.${filter.sortBy}`, filter.order);
+  
+  return query.getMany();
+}
+
+// Usage: GET /api/v1/bets?status=PENDING&minAmount=10000&sortBy=amount&order=DESC
+```
+
+---
+
+## Caching Strategy Rules
+
+### Rule 1: Cache Levels
+```typescript
+// Level 1: In-Memory Cache (fast, small)
+class CacheService {
+  private memory = new Map(); // Good for: user profiles, leaderboard
+}
+
+// Level 2: Redis Cache (medium speed, medium size)
+this.redis.get('key'); // Good for: recent bets, user stats
+
+// Level 3: Database Query Cache (slow, large)
+// (Materialized views in Postgres)
+```
+
+---
+
+### Rule 2: Cache Invalidation Strategy
+```typescript
+// ❌ NAIVE: Cache everything with 1 hour TTL
+// → Stale data for 1 hour
+
+// ✅ SMART: TTL based on change frequency
+- User profile: 1 hour (changes rarely)
+- User balance: 5 minutes (changes often)
+- Leaderboard: 1 minute (changes every second)
+- Search results: 30 seconds (changes often)
+
+// ✅ SMARTER: Event-based invalidation
+async updateUserBalance(userId: number, delta: number) {
+  // Update database
+  // Invalidate cache
+  await cache.del(`user:${userId}:balance`);
+  await cache.del('leaderboard:top100'); // might change
+}
+```
+
+---
+
+## Monitoring & Observability Rules
+
+### Rule 1: Log Levels
+```typescript
+// 🔴 ERROR: Failures that need immediate action
+logger.error('Database connection failed', { error, context });
+
+// 🟡 WARN: Potential issues
+logger.warn('High memory usage', { memory: 80 });
+
+// 🟢 INFO: Important business events
+logger.info('User registered', { userId, referralCode });
+
+// 🔵 DEBUG: Development info
+logger.debug('Query execution time', { query, ms: 150 });
+
+// ⚫ TRACE: Very detailed (disabled in production)
+logger.trace('Variable value', { variable });
+
+// ❌ DON'T: Log everything at ERROR level
+// ❌ DON'T: Log passwords, tokens, sensitive data
+```
+
+---
+
+### Rule 2: Metrics to Track
+```typescript
+// 📊 Business metrics
+- Active users
+- Transactions per second
+- Bet win rate
+- Average payout
+- User retention
+
+// ⚡ Performance metrics
+- API response time (p50, p95, p99)
+- Database query time
+- Cache hit rate
+- Worker queue depth
+
+// 🔒 Reliability metrics
+- Error rate
+- Failed transactions
+- Duplicate payouts
+- Transaction settlement time
+
+// Setup with Prometheus + Grafana
+```
+
+---
+
+## Testing Strategy Rules
+
+### Rule 1: Test Pyramid
+```
+         /\
+        /  \  E2E Tests (10%)
+       /____\
+      /      \
+     / Integ. \ Integration Tests (30%)
+    /_________\
+   /           \
+  / Unit Tests  \ Unit Tests (60%)
+ /_______________\
+```
+
+**Rule:** 60% unit, 30% integration, 10% E2E
+
+---
+
+### Rule 2: Test Cases to Write
+```typescript
+// ✅ Happy path
+it('should place bet when valid', async () => {
+  const result = await service.placeBet(validDto, userId);
+  expect(result.status).toBe('PENDING');
+});
+
+// ✅ Error cases
+it('should throw when insufficient balance', async () => {
+  expect(() => service.placeBet(dto, poorUserId)).toThrow(InsufficientBalanceError);
+});
+
+// ✅ Edge cases
+it('should handle race condition with locking', async () => {
+  // 2 concurrent requests, only 1 succeeds
+});
+
+// ✅ Integration
+it('should update wallet balance after bet', async () => {
+  await service.placeBet(dto, userId);
+  const wallet = await walletRepo.findById(userId);
+  expect(wallet.balance).toBe(originalBalance - amount);
+});
+```
+
+---
+
+## Deployment Rules
+
+### Rule 1: Blue-Green Deployment
+```
+Production (Blue - Current)
+├─ 100% traffic
+├─ Stable version v1.0
+
+Staging (Green - New)
+├─ 0% traffic
+├─ New version v1.1
+├─ Run tests
+├─ Monitor metrics
+
+If Green OK:
+  Switch traffic: 0% → 100%
+  If issues: Quick rollback to Blue
+```
+
+---
+
+### Rule 2: Rollout Strategy
+```
+Canary Release (Gradual rollout)
+
+Time 0:     v1.0: 100%
+Time 5min:  v1.0: 95%, v1.1: 5%   (Monitor errors)
+Time 15min: v1.0: 75%, v1.1: 25%  (Monitor errors)
+Time 30min: v1.0: 50%, v1.1: 50%  (Monitor errors)
+Time 60min: v1.0: 0%,  v1.1: 100% (Complete)
+
+If error rate spike: Rollback v1.1 immediately
+```
+
+---
+
+### Rule 3: Database Migration Strategy
+```typescript
+// ✅ GOOD: Backward compatible migrations
+// V1: existing code expects users.username
+// Add: users.fullName nullable column
+
+// New code:
+async getFullName(userId) {
+  const user = await userRepo.find(userId);
+  return user.fullName || user.username; // fallback
+}
+
+// No downtime, no breaking change
+
+// ❌ BAD: Breaking migrations
+// V1: users.username
+// V2: ALTER TABLE users DROP COLUMN username;
+// → Old code crashes! Downtime!
+```
+
+---
+
+## Team Collaboration Rules
+
+### Rule 1: Code Review Checklist
+```
+[ ] Logic is correct
+[ ] No security issues (SQL injection, XSS, CSRF)
+[ ] Error handling complete
+[ ] Tests written (unit + integration)
+[ ] Performance acceptable (no N+1, no huge loads)
+[ ] Documentation updated
+[ ] Follows team conventions
+[ ] No hardcoded values (use config)
+[ ] Logs added for debugging
+```
+
+---
+
+### Rule 2: Git Workflow
+```
+main (production ready)
+├─ feature/user-registration (dev branch)
+├─ feature/bet-matching (dev branch)
+└─ hotfix/security-patch (hotfix branch)
+
+Flow:
+1. Create branch from main
+2. Push to feature/xxx
+3. Create Pull Request
+4. Code review (at least 1 approval)
+5. Merge to main
+6. Auto-deploy to staging
+7. Manual approval to production
+```
+
+---
+
+### Rule 3: Commit Message Format
+```
+❌ Bad:
+  "fix bug"
+  "update code"
+  "asdf"
+
+✅ Good:
+  "feat(auth): add email verification"
+  "fix(bet): prevent race condition in auto-match"
+  "refactor(db): optimize user query with indexes"
+  "docs(readme): add deployment guide"
+
+Format:
+  type(scope): subject
+  
+  body (optional)
+  
+  - type: feat, fix, refactor, docs, test, chore, perf
+  - scope: module affected
+  - subject: what changed
+```
+
+---
+
 # 📋 Anti-Patterns Quick Reference
 
 | ❌ Anti-Pattern | 🔴 Problem | ✅ Solution |
