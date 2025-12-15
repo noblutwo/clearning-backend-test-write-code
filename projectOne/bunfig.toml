@@ -1,0 +1,6 @@
+# Bun configuration file
+[run]
+# Define runtime options here
+
+[build]
+# Define build options here
